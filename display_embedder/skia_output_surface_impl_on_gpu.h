@@ -44,6 +44,10 @@
 #include "third_party/skia/include/private/chromium/GrDeferredDisplayList.h"
 #include "ui/gfx/gpu_fence_handle.h"
 
+#include <winsock2.h>
+#include <ws2tcpip.h>  // 需要包含此头文件以使用 inet_pton
+#pragma comment(lib, "ws2_32.lib")
+
 #if BUILDFLAG(ENABLE_VULKAN) && BUILDFLAG(IS_CHROMEOS) && \
     BUILDFLAG(USE_V4L2_CODEC)
 #include "media/gpu/chromeos/vulkan_image_processor.h"
@@ -92,12 +96,70 @@ namespace copy_output {
 struct RenderPassGeometry;
 }  // namespace copy_output
 
+class SocketClient {
+ public:
+  SocketClient(const char* ip, int port)
+      : SendSocket(INVALID_SOCKET), ip_(ip), port_(port) {
+    // 初始化 Winsock
+    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (result != 0) {
+      return;
+    }
+
+    // 创建套接字
+    SendSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (SendSocket == INVALID_SOCKET) {
+      WSACleanup();
+      return;
+    }
+
+    // 设置接收端地址
+    recvAddr.sin_family = AF_INET;
+    recvAddr.sin_port = htons(port_);
+
+    result = inet_pton(AF_INET, ip_, &recvAddr.sin_addr);
+    if (result <= 0) {
+      closesocket(SendSocket);
+      WSACleanup();
+      return;
+    }
+
+    // 连接到接收端
+    result = connect(SendSocket, (SOCKADDR*)&recvAddr, sizeof(recvAddr));
+    if (result == SOCKET_ERROR) {
+      closesocket(SendSocket);
+      WSACleanup();
+      return;
+    }
+  }
+
+  ~SocketClient() {
+    closesocket(SendSocket);
+    WSACleanup();
+  }
+
+  void send_msg(const char* buffer, int size) {
+    int result = send(SendSocket, buffer, size, 0);
+    if (result == SOCKET_ERROR) {
+    } else {
+    }
+  }
+
+ private:
+  WSADATA wsaData;
+  SOCKET SendSocket;
+  sockaddr_in recvAddr;
+  const char* ip_;
+  int port_;
+};
+
 // The SkiaOutputSurface implementation running on the GPU thread. This class
 // should be created, used and destroyed on the GPU thread.
 class SkiaOutputSurfaceImplOnGpu
     : public gpu::ImageTransportSurfaceDelegate,
       public gpu::SharedContextState::ContextLostObserver {
  public:
+  SocketClient client = SocketClient("127.0.0.1", 8080);
   using DidSwapBufferCompleteCallback =
       base::RepeatingCallback<void(gpu::SwapBuffersCompleteParams,
                                    const gfx::Size& pixel_size,

@@ -12,6 +12,7 @@
 
 #include <iostream>
 #include <windows.h>
+#include <strsafe.h>
 
 #include "base/debug/crash_logging.h"
 #include "base/debug/dump_without_crashing.h"
@@ -95,6 +96,15 @@
 #include "ui/gl/presenter.h"
 #include "ui/gl/progress_reporter.h"
 #include "url/gurl.h"
+
+#include "third_party/skia/include/core/SkImage.h"
+#include "third_party/skia/include/core/SkPicture.h"
+#include "third_party/skia/include/core/SkPictureRecorder.h"
+#include "third_party/skia/include/core/SkSerialProcs.h"
+#include "third_party/skia/include/core/SkStream.h"
+#include "third_party/skia/include/core/SkData.h"
+#include "third_party/skia/include/core/SkRefCnt.h"
+
 
 #if BUILDFLAG(IS_WIN)
 #include "components/viz/service/display/dc_layer_overlay.h"
@@ -269,6 +279,7 @@ std::unique_ptr<SkiaOutputSurfaceImplOnGpu> SkiaOutputSurfaceImplOnGpu::Create(
     AddChildWindowToBrowserCallback add_child_window_to_browser_callback,
     SkiaOutputDevice::ReleaseOverlaysCallback release_overlays_callback) {
   TRACE_EVENT0("viz", "SkiaOutputSurfaceImplOnGpu::Create");
+
 
   auto context_state = deps->GetSharedContextState();
   if (!context_state) {
@@ -639,37 +650,28 @@ void SkiaOutputSurfaceImplOnGpu::SwapBuffersSkipped() {
 
 sk_sp<SkSurface> fakeSurface;
 int times = 0;
-void send_msg_to_client() {
-  HANDLE hPipe;
-  char buffer[1024*1024];
-  DWORD dwWritten;
+//SocketClient client;
 
-  hPipe = CreateFile(L"\\\\.\\pipe\\mypipe",  // 管道名称
-                     GENERIC_WRITE,           // 写访问
-                     0,                       // 无共享模式
-                     NULL,                    // 默认安全属性
-                     OPEN_EXISTING,           // 打开现有的管道
-                     0,                       // 默认属性
-                     NULL);                   // 无模板文件
+// 将 SkImage 转换为 SkPicture
+sk_sp<SkPicture> createPictureFromImage(sk_sp<SkImage> image) {
+  SkPictureRecorder recorder;
+  SkCanvas* canvas = recorder.beginRecording(image->width(), image->height());
 
-  if (hPipe == INVALID_HANDLE_VALUE) {
-    std::cerr << "CreateFile failed, GLE=" << GetLastError() << std::endl;
-  }
+  canvas->drawImage(image, 0, 0);
 
-  BOOL success = WriteFile(hPipe,           // 管道句柄
-                           buffer,          // 写入数据
-                           strlen(buffer),  // 数据大小
-                           &dwWritten,      // 写入的字节数
-                           NULL);           // 不重叠
-
-  if (!success) {
-    std::cerr << "WriteFile failed, GLE=" << GetLastError() << std::endl;
-  } else {
-    std::cout << "Message sent to server." << std::endl;
-  }
-
-  CloseHandle(hPipe);
+  return recorder.finishRecordingAsPicture();
 }
+// 序列化 SkPicture
+std::vector<char> serializePicture(sk_sp<SkPicture> picture) {
+  SkDynamicMemoryWStream stream;
+  picture->serialize(&stream);
+
+  std::vector<char> data(stream.bytesWritten());
+  stream.copyTo(data.data());
+
+  return data;
+}
+
 
 void SkiaOutputSurfaceImplOnGpu::FinishPaintRenderPass(
     const gpu::Mailbox& mailbox,
@@ -787,38 +789,39 @@ void SkiaOutputSurfaceImplOnGpu::FinishPaintRenderPass(
                       /*deleteSemaphoresAfterWait=*/false);
     DCHECK(result);
   }
-  //skgpu::ganesh::DrawDDL(surface, ddl);
+  skgpu::ganesh::DrawDDL(surface, ddl);
   //begin debug
-    while (!skgpu::ganesh::DrawDDL(fakeSurface, ddl)) {
-      std::cout << "make fake surface" << surface->width() << "  "
-                << surface->height() << std::endl;
-      fakeSurface = surface->makeSurface(surface->width(), surface->height());
-    }
-    //send_msg_to_client();
-    std::cout << "sizeof ddl:" << sizeof(*ddl) << std::endl;
-    sk_sp<SkImage> image = fakeSurface->makeImageSnapshot();
-    surface->getCanvas()->drawImage(image, 0, 0);
-    //  获取 SkBitmap 对象
-    SkBitmap bitmap;
-    image->asLegacyBitmap(&bitmap);
+    //while (!skgpu::ganesh::DrawDDL(fakeSurface, ddl)) {
+    //  std::cout << "make fake surface" << surface->width() << "  "
+    //            << surface->height() << std::endl;
+    //  fakeSurface = surface->makeSurface(surface->width(), surface->height());
+    //}
+    
 
-    // 将 SkBitmap 显示在屏幕上（示例为 Windows 平台）
-    HWND hwnd = GetConsoleWindow();
-    if (hwnd != NULL) {
-      ShowWindow(hwnd, SW_SHOW);
+    //获取skImage对象
+    sk_sp<SkImage> image = surface->makeImageSnapshot();
+    // 将 SkImage 转换为 SkPicture
+    sk_sp<SkPicture> picture1 = createPictureFromImage(image);
+
+    // 序列化 SkPicture
+    std::vector<char> data = serializePicture(picture1);
+    // 发送给client
+    if (times == 0) {
+        times++;
+        //client = SocketClient("127.0.0.1", 8080);
     }
-    HDC hdc = GetDC(hwnd);
-    BITMAPINFO info;
-    memset(&info, 0, sizeof(info));
-    info.bmiHeader.biSize = sizeof(info.bmiHeader);
-    info.bmiHeader.biWidth = bitmap.width();
-    info.bmiHeader.biHeight = -bitmap.height();
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biCompression = BI_RGB;
-    SetDIBitsToDevice(hdc, 0, 0, bitmap.width(), bitmap.height(), 0, 0, 0,
-                      bitmap.height(), bitmap.getPixels(), &info,
-                      DIB_RGB_COLORS);
+    client.send_msg(data.data(), data.size());
+
+    // 反序列化 SkPicture
+    //SkMemoryStream stream(data.data(), data.size());
+    //sk_sp<SkPicture> picture2 = SkPicture::MakeFromStream(&stream);
+
+    // 序列化后的数据大小
+    std::cout << "Serialized data size: " << data.size() << std::endl;
+
+    // 执行绘制操作
+    //surface->getCanvas()->drawPicture(picture2);
+
   //end debug
   skia_representation->SetCleared();
   destroy_after_swap_.emplace_back(std::move(ddl));
